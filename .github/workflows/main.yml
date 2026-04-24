@@ -1,0 +1,60 @@
+name: PDX SMS Bot 24/7
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/15 * * * *'
+
+concurrency:
+  group: pdx-sms-bot
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: 1
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'  # 3.9 বেশি stable
+        
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install setuptools wheel  # 🔥 গুরুত্বপূর্ণ: pkg_resources এর জন্য
+        pip install requests
+        pip install playwright
+        pip install playwright-stealth
+        playwright install chromium
+      shell: bash
+      
+    - name: Create log directory
+      run: |
+        touch sms_bot.log
+        echo "=== Bot started at $(date) ===" >> sms_bot.log
+        
+    - name: Run PDX SMS Bot
+      env:
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        CHAT_ID: ${{ secrets.CHAT_ID }}
+        MY_USER: ${{ secrets.MY_USER }}
+        MY_PASS: ${{ secrets.MY_PASS }}
+      run: |
+        python -u main.py 2>&1 | tee -a sms_bot.log
+      shell: bash
+      
+    - name: Upload Logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: bot-logs-${{ github.run_id }}
+        path: sms_bot.log
+        retention-days: 7
