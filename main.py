@@ -6,6 +6,7 @@ import requests
 import time
 import logging
 import sys
+import threading
 from datetime import datetime
 from playwright.async_api import async_playwright
 
@@ -70,14 +71,14 @@ def send_telegram_message(text: str, keyboard: dict = None) -> bool:
             logger.info("✅ Message sent to Telegram")
             return True
         else:
-            logger.error(f"Telegram API error: {response.status_code}")
+            logger.error(f"Telegram API error: {response.status_code} - {response.text}")
             return False
     except Exception as e:
         logger.error(f"Telegram error: {e}")
         return False
 
 def send_telegram_sms(date_str: str, num: str, sms_text: str, otp: str, cli_source: str, is_update: bool = False):
-    """Send SMS notification with instant copy button"""
+    """Send SMS notification with copy button"""
     masked = f"***{num[-4:]}" if len(num) > 4 else num
     header = "🔴 NEW SMS RECEIVED" if not is_update else "🔄 UPDATED SMS"
     
@@ -91,13 +92,13 @@ def send_telegram_sms(date_str: str, num: str, sms_text: str, otp: str, cli_sour
 ✅ <b>Full Message:</b>
 <code>{sms_text[:500]}</code>"""
     
-    # 🔥 copy_text প্যারামিটার - এক ক্লিকেই কপি
+    # 🔥 callback_data ব্যবহার করে OTP কপি (copy_text কাজ না করলে)
     keyboard = {
         "inline_keyboard": [
             [
                 {
                     "text": f"📋 {otp}",
-                    "copy_text": otp
+                    "callback_data": f"copy_{otp}"
                 }
             ],
             [
@@ -108,6 +109,56 @@ def send_telegram_sms(date_str: str, num: str, sms_text: str, otp: str, cli_sour
     }
     
     return send_telegram_message(text, keyboard)
+
+# ===== CALLBACK HANDLER =====
+def run_callback_poller():
+    """Handle callback queries for OTP copy"""
+    last_update_id = 0
+    
+    logger.info("🔄 Callback poller started")
+    
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+            response = requests.get(url, params={
+                "offset": last_update_id + 1,
+                "timeout": 10,
+                "allowed_updates": ["callback_query"]
+            }, timeout=15)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("ok"):
+                    for update in data.get("result", []):
+                        last_update_id = update.get("update_id")
+                        
+                        if "callback_query" in update:
+                            callback = update["callback_query"]
+                            callback_id = callback["id"]
+                            data_cb = callback.get("data", "")
+                            
+                            if data_cb and data_cb.startswith("copy_"):
+                                otp = data_cb.replace("copy_", "")
+                                
+                                # উত্তর দিন - OTP কপি হবে
+                                answer_url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
+                                answer_response = requests.post(answer_url, json={
+                                    "callback_query_id": callback_id,
+                                    "text": f"✅ OTP কপি হয়েছে: {otp}",
+                                    "show_alert": False,
+                                    "cache_time": 0
+                                }, timeout=3)
+                                
+                                if answer_response.status_code == 200:
+                                    logger.info(f"📋 OTP copied: {otp}")
+                                else:
+                                    logger.error(f"Callback answer failed: {answer_response.text}")
+            
+            time.sleep(0.5)
+            
+        except Exception as e:
+            logger.error(f"Callback poller error: {e}")
+            time.sleep(5)
 
 def extract_otp(msg: str) -> str:
     """Extract OTP from message"""
@@ -146,6 +197,7 @@ def update_firebase(num: str, msg: str, date_str: str, cli_source: str = "Unknow
             "paid": False
         }
         requests.put(url, json=payload, timeout=5)
+        logger.info(f"📁 Saved to Firebase: {num[-4:]}")
     except Exception as e:
         logger.error(f"Firebase error: {e}")
 
@@ -219,10 +271,10 @@ async def start_bot():
     startup_text = """<b>🟢 PDX SMS Bot Started</b>
 
 ✅ Monitoring active
-⚡ <b>Instant OTP Copy</b> - Just click the button!
-📋 OTP will be copied directly to clipboard
+⚡ <b>Instant OTP Copy</b> - Click the button!
+📋 OTP will be copied to clipboard
 
-<i>No loading, no alerts, instant copy!</i>"""
+<i>Click on OTP button to copy!</i>"""
     
     send_telegram_message(startup_text, None)
     
@@ -258,7 +310,7 @@ async def start_bot():
             await browser.close()
             return
         
-        # 🔥 প্রথমবার বট স্টার্ট হলে শুধু ১টা SMS দেবে
+        # প্রথমবার বট স্টার্ট হলে শুধু ১টা SMS দেবে
         is_first_scan = True
         
         while True:
@@ -299,23 +351,23 @@ async def start_bot():
                     logger.info(f"📊 Found {len(valid_rows)} valid SMS rows")
                     
                     if is_first_scan:
-                        # 🔥 প্রথম স্ক্যান: শুধু সবচেয়ে লেটেস্ট ১টা SMS পাঠাও
-                        latest = valid_rows[0]  # সবচেয়ে নতুন SMS
+                        # প্রথম স্ক্যান: শুধু সবচেয়ে লেটেস্ট ১টা SMS পাঠাও
+                        latest = valid_rows[0]
                         otp = extract_otp(latest['sms'])
                         
-                        logger.info(f"📨 First scan - sending latest SMS only (OTP: {otp})")
+                        logger.info(f"📨 First scan - sending latest SMS (OTP: {otp})")
                         
                         if send_telegram_sms(latest['date'], latest['num'], latest['sms'], otp, latest['cli']):
                             update_firebase(latest['num'], latest['sms'], latest['date'], latest['cli'])
                             logger.info("✅ Latest SMS sent successfully")
+                        else:
+                            logger.error("❌ Failed to send SMS")
                         
-                        # 🔥 সব SMS ক্যাশে সেভ করে দাও (যাতে পরে নতুন চিনতে পারে)
+                        # সব SMS ক্যাশে সেভ করে দাও
                         for item in valid_rows:
                             sent_msgs[f"{item['num']}|{item['sms']}"] = item['date']
                         
                         logger.info(f"📦 Cached {len(valid_rows)} existing SMS records")
-                        
-                        # প্রথম স্ক্যান শেষ - এখন থেকে শুধু নতুন আসা SMS পাঠাবে
                         is_first_scan = False
                         
                     else:
@@ -363,4 +415,9 @@ async def main():
         sys.exit(1)
 
 if __name__ == "__main__":
+    # Start callback poller in background
+    poller_thread = threading.Thread(target=run_callback_poller, daemon=True)
+    poller_thread.start()
+    logger.info("✅ Callback poller started")
+    
     asyncio.run(main())
