@@ -258,7 +258,7 @@ async def start_bot():
             await browser.close()
             return
         
-        # 🔥 গুরুত্বপূর্ণ: প্রথম স্ক্যানে সব SMS পাঠাবে
+        # 🔥 প্রথমবার বট স্টার্ট হলে শুধু ১টা SMS দেবে
         is_first_scan = True
         
         while True:
@@ -299,27 +299,23 @@ async def start_bot():
                     logger.info(f"📊 Found {len(valid_rows)} valid SMS rows")
                     
                     if is_first_scan:
-                        # 🔥 প্রথম স্ক্যানে সব SMS পাঠানো হবে (উল্টো ক্রমে - নতুন থেকে পুরোনো)
-                        logger.info("📨 First scan - sending ALL existing SMS records...")
+                        # 🔥 প্রথম স্ক্যান: শুধু সবচেয়ে লেটেস্ট ১টা SMS পাঠাও
+                        latest = valid_rows[0]  # সবচেয়ে নতুন SMS
+                        otp = extract_otp(latest['sms'])
                         
-                        sent_count = 0
-                        # সবগুলো SMS পাঠাও (reverse করে যাতে newest প্রথমে আসে)
-                        for item in reversed(valid_rows):
-                            otp = extract_otp(item['sms'])
-                            if send_telegram_sms(item['date'], item['num'], item['sms'], otp, item['cli']):
-                                update_firebase(item['num'], item['sms'], item['date'], item['cli'])
-                                sent_count += 1
-                                logger.info(f"📤 Sent SMS #{sent_count} - OTP: {otp}")
-                                
-                                # ক্যাশে সেভ করো
-                                sent_msgs[f"{item['num']}|{item['sms']}"] = item['date']
-                                
-                                # Rate limit - 1 সেকেন্ড ব্যবধান
-                                await asyncio.sleep(1)
+                        logger.info(f"📨 First scan - sending latest SMS only (OTP: {otp})")
                         
-                        logger.info(f"✅ First scan complete! Sent {sent_count} SMS messages")
+                        if send_telegram_sms(latest['date'], latest['num'], latest['sms'], otp, latest['cli']):
+                            update_firebase(latest['num'], latest['sms'], latest['date'], latest['cli'])
+                            logger.info("✅ Latest SMS sent successfully")
                         
-                        # 🔥 প্রথম স্ক্যান শেষ - এখন থেকে শুধু নতুন আসা SMS পাঠাবে
+                        # 🔥 সব SMS ক্যাশে সেভ করে দাও (যাতে পরে নতুন চিনতে পারে)
+                        for item in valid_rows:
+                            sent_msgs[f"{item['num']}|{item['sms']}"] = item['date']
+                        
+                        logger.info(f"📦 Cached {len(valid_rows)} existing SMS records")
+                        
+                        # প্রথম স্ক্যান শেষ - এখন থেকে শুধু নতুন আসা SMS পাঠাবে
                         is_first_scan = False
                         
                     else:
@@ -353,8 +349,6 @@ async def start_bot():
                     
             except Exception as e:
                 logger.error(f"Loop error: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
             
             await asyncio.sleep(3)
 
