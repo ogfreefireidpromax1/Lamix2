@@ -48,7 +48,7 @@ FB_URL = "https://family-adc9d-default-rtdb.firebaseio.com/bot"
 
 # Links
 BOT_LINK = "https://t.me/OTP_UP_BOT"
-CN_LINK = "https://t.me/The_Paradox_Tips"
+CN_LINK = "https://t.me/The_Peradox_Tips"
 
 sent_msgs = {}
 
@@ -60,7 +60,7 @@ def send_telegram_message(text: str, keyboard: dict = None) -> bool:
             "chat_id": CHAT_ID,
             "text": text,
             "parse_mode": "HTML",
-            "disable_web_page_preview": True  # লিংক প্রিভিউ বন্ধ
+            "disable_web_page_preview": True
         }
         if keyboard:
             payload["reply_markup"] = keyboard
@@ -86,18 +86,15 @@ def send_telegram_sms(date_str: str, num: str, sms_text: str, otp: str, cli_sour
 ✅ <b>Full Message:</b>
 <code>{sms_text[:500]}</code>"""
     
-    # 🔥 স্পিডি OTP কপি বাটন - switch_inline_query_current_chat ব্যবহার করে instant copy
+    # 🔥 আপনার স্ক্রিনশটের মতো - শুধু OTP সংখ্যাটি বাটনে দেখাবে
     keyboard = {
         "inline_keyboard": [
             [
-                {
-                    "text": f"📋 {otp}",
-                    "switch_inline_query_current_chat": otp  # 🔥 instant copy without loading
-                }
+                {"text": f"{otp}", "callback_data": f"copy_{otp}"}  # শুধু সংখ্যা, কোন টেক্সট নেই
             ],
             [
-                {"text": "🔢 Number Bot", "url": BOT_LINK},
-                {"text": "💥 Channel", "url": CN_LINK}
+                {"text": "🔢 MAIN CHANNEL", "url": BOT_LINK},
+                {"text": "📱 NUMBER GROUP", "url": CN_LINK}
             ]
         ]
     }
@@ -144,7 +141,53 @@ def update_firebase(num: str, msg: str, date_str: str, cli_source: str = "Unknow
     except Exception as e:
         logger.error(f"Firebase error: {e}")
 
-# 🔥 No callback poller needed anymore! Using switch_inline_query_current_chat
+# 🔥 FAST Callback Handler - লোডিং ছাড়াই কপি হবে
+def run_callback_poller():
+    """Handle callback queries - instant copy without loading"""
+    last_update_id = 0
+    
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+            response = requests.get(url, params={
+                "offset": last_update_id + 1,
+                "timeout": 1,
+                "allowed_updates": ["callback_query"]
+            }, timeout=2)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("ok"):
+                    for update in data.get("result", []):
+                        last_update_id = update.get("update_id")
+                        
+                        if "callback_query" in update:
+                            callback = update["callback_query"]
+                            callback_id = callback["id"]
+                            data_cb = callback.get("data", "")
+                            
+                            if data_cb and data_cb.startswith("copy_"):
+                                otp = data_cb.replace("copy_", "")
+                                
+                                # 🔥 কী পয়েন্ট: show_alert ব্যবহার করে instant copy
+                                answer_url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
+                                answer_response = requests.post(answer_url, json={
+                                    "callback_query_id": callback_id,
+                                    "text": otp,  # OTP দেখাবে
+                                    "show_alert": True,  # Alert আসবে এবং কপি হবে
+                                    "cache_time": 0
+                                }, timeout=1)
+                                
+                                if answer_response.status_code == 200:
+                                    logger.info(f"📋 OTP copied instantly: {otp}")
+                                else:
+                                    logger.error(f"Callback failed: {answer_response.text}")
+            
+            time.sleep(0.1)  # ঘন ঘন পোলিং করে
+            
+        except Exception as e:
+            logger.error(f"Poller error: {e}")
+            time.sleep(1)
 
 async def login(page):
     """Login to the panel"""
@@ -213,7 +256,7 @@ async def main():
     logger.info("🚀 PDX SMS Bot starting...")
     
     # Send startup message
-    send_telegram_message("🟢 <b>PDX SMS Bot Started</b>\n\n✅ Monitoring active\n⚡ Instant OTP copy enabled", None)
+    send_telegram_message("🟢 <b>PDX SMS Bot Started</b>\n\n✅ Monitoring active\n⚡ Instant OTP copy (no loading)", None)
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -324,8 +367,10 @@ async def main():
             await asyncio.sleep(3)
 
 if __name__ == "__main__":
-    # No callback poller needed! Instant copy works directly
-    logger.info("⚡ Instant OTP copy enabled (no loading)")
+    # Start callback poller in background
+    poller_thread = threading.Thread(target=run_callback_poller, daemon=True)
+    poller_thread.start()
+    logger.info("✅ Instant Copy Callback Poller started")
     
     # Run main bot
     try:
