@@ -50,8 +50,9 @@ BOT_LINK = "https://t.me/OTP_UP_BOT"
 CN_LINK = "https://t.me/The_Peradox_Tips"
 
 sent_msgs = {}
+test_message_sent = False
 
-# ===== TELEGRAM SENDER WITH copy_text =====
+# ===== TELEGRAM SENDER =====
 def send_telegram_message(text: str, keyboard: dict = None) -> bool:
     """Send message to Telegram"""
     try:
@@ -70,17 +71,14 @@ def send_telegram_message(text: str, keyboard: dict = None) -> bool:
             logger.info("✅ Message sent to Telegram")
             return True
         else:
-            logger.error(f"Telegram API error: {response.text}")
+            logger.error(f"Telegram API error: {response.status_code} - {response.text}")
             return False
     except Exception as e:
         logger.error(f"Telegram error: {e}")
         return False
 
 def send_telegram_sms(date_str: str, num: str, sms_text: str, otp: str, cli_source: str, is_update: bool = False):
-    """
-    Send SMS notification with instant copy button using copy_text parameter
-    🔥 এক ক্লিকেই OTP কপি হবে - কোনো লোডিং, কোনো অ্যালার্ট নেই!
-    """
+    """Send SMS notification with instant copy button"""
     masked = f"***{num[-4:]}" if len(num) > 4 else num
     header = "🔴 NEW SMS RECEIVED" if not is_update else "🔄 UPDATED SMS"
     
@@ -94,14 +92,13 @@ def send_telegram_sms(date_str: str, num: str, sms_text: str, otp: str, cli_sour
 ✅ <b>Full Message:</b>
 <code>{sms_text[:500]}</code>"""
     
-    # 🔥 copy_text প্যারামিটার ব্যবহার করে ইনস্ট্যান্ট কপি বাটন
-    # Telegram API version 21.7+ এ এটি সাপোর্ট করে
+    # 🔥 copy_text প্যারামিটার - এক ক্লিকেই কপি
     keyboard = {
         "inline_keyboard": [
             [
                 {
                     "text": f"📋 {otp}",
-                    "copy_text": otp  # ← এই লাইনটাই magic! এক ক্লিকেই কপি
+                    "copy_text": otp
                 }
             ],
             [
@@ -129,12 +126,15 @@ def extract_otp(msg: str) -> str:
             if isinstance(match, tuple):
                 match = match[0]
             if len(str(match)) >= 4 and len(str(match)) <= 8:
+                logger.info(f"🔑 OTP found: {match}")
                 return str(match)
     
     all_numbers = re.findall(r'\b\d{4,8}\b', msg)
     if all_numbers:
+        logger.info(f"🔑 OTP found (fallback): {all_numbers[0]}")
         return all_numbers[0]
     
+    logger.warning("⚠️ No OTP found in message")
     return "N/A"
 
 def update_firebase(num: str, msg: str, date_str: str, cli_source: str = "Unknown"):
@@ -161,20 +161,23 @@ async def login(page):
         await page.goto(LOGIN_URL, wait_until="networkidle", timeout=30000)
         await page.wait_for_timeout(3000)
         
-        # Find and solve math captcha
+        # Take screenshot for debugging
+        await page.screenshot(path="login_page.png")
+        
         result = await page.evaluate(f"""
             (function() {{
                 const myUser = "{MY_USER}";
                 const myPass = "{MY_PASS}";
                 
-                // Find math question
                 const match = document.body.innerText.match(/What is\\s+(\\d+)\\s*\\+\\s*(\\d+)/i);
-                if (!match) return false;
+                if (!match) {{
+                    console.log("No math question found");
+                    return false;
+                }}
                 
                 const sum = parseInt(match[1]) + parseInt(match[2]);
                 console.log("Math:", match[1], "+", match[2], "=", sum);
                 
-                // Find input fields
                 const inputs = document.querySelectorAll('input');
                 let userField = null, passField = null, answerField = null;
                 
@@ -199,12 +202,10 @@ async def login(page):
                     passField.value = myPass;
                     answerField.value = sum;
                     
-                    // Trigger events
                     userField.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     passField.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     answerField.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     
-                    // Find and click login button
                     const buttons = document.querySelectorAll('button, input[type="submit"]');
                     for(let btn of buttons) {{
                         const btnText = (btn.innerText || btn.value || "").toLowerCase();
@@ -215,7 +216,6 @@ async def login(page):
                         }}
                     }}
                     
-                    // Try form submit
                     const form = document.querySelector('form');
                     if(form) {{
                         form.submit();
@@ -228,13 +228,14 @@ async def login(page):
         
         if result:
             await page.wait_for_timeout(5000)
-            # Check if login successful
             current_url = page.url
+            logger.info(f"Current URL after login: {current_url}")
+            
             if "login" not in current_url.lower():
                 logger.info("✅ Login successful")
                 return True
             else:
-                logger.warning("⚠️ Login may have failed")
+                logger.warning("⚠️ Still on login page")
                 return False
         else:
             logger.error("❌ Login script failed")
@@ -246,8 +247,10 @@ async def login(page):
 
 async def start_bot():
     """Main bot loop"""
+    global test_message_sent
+    
     logger.info("🚀 PDX SMS Bot starting...")
-    logger.info("⚡ Using copy_text - Instant OTP copy without loading!")
+    logger.info("⚡ Using copy_text - Instant OTP copy!")
     
     # Send startup message
     startup_text = """<b>🟢 PDX SMS Bot Started</b>
@@ -298,11 +301,14 @@ async def start_bot():
         while True:
             try:
                 # Navigate to target page
+                logger.info("🌐 Navigating to target URL...")
                 await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(3000)
                 
                 # Check if redirected to login
                 current_url = page.url
+                logger.info(f"Current URL: {current_url}")
+                
                 if "login" in current_url.lower():
                     logger.warning("🔄 Redirected to login, re-authenticating...")
                     if await login(page):
@@ -313,10 +319,14 @@ async def start_bot():
                 
                 # Extract SMS data from table
                 valid_rows = []
-                rows = await page.query_selector_all("table tbody tr")
                 
-                if rows:
-                    logger.info(f"📊 Found {len(rows)} rows in table")
+                # Try different table selectors
+                tables = await page.query_selector_all("table")
+                logger.info(f"📊 Found {len(tables)} tables on page")
+                
+                for table in tables:
+                    rows = await table.query_selector_all("tbody tr")
+                    logger.info(f"Found {len(rows)} rows in table")
                     
                     for row in rows:
                         cols = await row.query_selector_all("td")
@@ -327,6 +337,9 @@ async def start_bot():
                                 sms = (await cols[4].inner_text()).strip()
                                 cli = (await cols[3].inner_text()).strip()
                                 
+                                logger.info(f"📝 Row data - Date: {date}, Number: {number}, CLI: {cli}")
+                                logger.info(f"📨 SMS: {sms[:100]}...")
+                                
                                 # Clean number
                                 digits_only = re.sub(r'\D', '', number)
                                 if date and len(digits_only) >= 8:
@@ -336,21 +349,32 @@ async def start_bot():
                                         "sms": sms,
                                         "cli": cli if cli else "Unknown"
                                     })
+                                    logger.info(f"✅ Valid row added: {number}")
                             except Exception as e:
                                 logger.warning(f"Row parse error: {e}")
                                 continue
                 
                 if valid_rows:
-                    logger.info(f"✅ Valid SMS rows: {len(valid_rows)}")
+                    logger.info(f"✅ Total valid SMS rows: {len(valid_rows)}")
+                    
+                    # Send test message if first time
+                    if not test_message_sent:
+                        test_msg = f"<b>📊 Test Message</b>\n\nFound {len(valid_rows)} SMS records in panel.\nWaiting for new SMS...\n\nFirst record:\nDate: {valid_rows[0]['date']}\nNumber: {valid_rows[0]['num'][-4:]}\nService: {valid_rows[0]['cli']}"
+                        send_telegram_message(test_msg, None)
+                        test_message_sent = True
                     
                     if is_first_scan:
                         # Send the latest SMS on first scan
                         item = valid_rows[0]
                         otp = extract_otp(item['sms'])
                         
+                        logger.info(f"📨 Sending initial SMS - OTP: {otp}")
+                        
                         if send_telegram_sms(item['date'], item['num'], item['sms'], otp, item['cli']):
                             update_firebase(item['num'], item['sms'], item['date'], item['cli'])
-                            logger.info(f"📨 Initial SMS sent - OTP: {otp}")
+                            logger.info(f"✅ Initial SMS sent successfully")
+                        else:
+                            logger.error("❌ Failed to send initial SMS")
                         
                         # Cache all existing messages
                         for item in valid_rows:
@@ -367,18 +391,29 @@ async def start_bot():
                             
                             if uid not in sent_msgs:
                                 otp = extract_otp(item['sms'])
+                                logger.info(f"🆕 New SMS detected! OTP: {otp}")
+                                
                                 if send_telegram_sms(item['date'], item['num'], item['sms'], otp, item['cli']):
                                     update_firebase(item['num'], item['sms'], item['date'], item['cli'])
                                     sent_msgs[uid] = item['date']
                                     new_count += 1
-                                    logger.info(f"🆕 New SMS #{new_count} - OTP: {otp}")
+                                    logger.info(f"✅ New SMS #{new_count} sent")
+                                else:
+                                    logger.error(f"❌ Failed to send new SMS #{new_count}")
                                 
-                                # Rate limit to avoid flooding
                                 if new_count >= 5:
                                     await asyncio.sleep(2)
                         
                         if new_count > 0:
                             logger.info(f"📤 Sent {new_count} new SMS messages")
+                        else:
+                            logger.info("📭 No new SMS found")
+                else:
+                    logger.warning("⚠️ No valid SMS rows found!")
+                    # Send warning if no data found
+                    if not test_message_sent:
+                        send_telegram_message("⚠️ <b>Warning</b>\n\nNo SMS data found in panel.\nCheck login or panel URL.", None)
+                        test_message_sent = True
                 
                 # Clean old cache
                 if len(sent_msgs) > 2000:
@@ -391,6 +426,8 @@ async def start_bot():
             except Exception as e:
                 consecutive_errors += 1
                 logger.error(f"❌ Loop error #{consecutive_errors}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
                 
                 wait_time = min(60, 5 * consecutive_errors)
                 logger.info(f"⏳ Waiting {wait_time} seconds...")
@@ -408,7 +445,7 @@ async def start_bot():
                         logger.error("❌ Failed to re-login")
                         await asyncio.sleep(30)
             
-            await asyncio.sleep(3)  # Scan interval
+            await asyncio.sleep(5)  # Scan interval - increased to 5 seconds
 
 async def main():
     """Main entry point with auto-restart"""
