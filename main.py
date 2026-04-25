@@ -5,7 +5,6 @@ import re
 import requests
 import time
 import logging
-import threading
 import sys
 from datetime import datetime
 from playwright.async_api import async_playwright
@@ -52,6 +51,7 @@ CN_LINK = "https://t.me/The_Peradox_Tips"
 
 sent_msgs = {}
 
+# ===== TELEGRAM SENDER WITH copy_text =====
 def send_telegram_message(text: str, keyboard: dict = None) -> bool:
     """Send message to Telegram"""
     try:
@@ -66,13 +66,21 @@ def send_telegram_message(text: str, keyboard: dict = None) -> bool:
             payload["reply_markup"] = keyboard
         
         response = requests.post(url, json=payload, timeout=10)
-        return response.status_code == 200
+        if response.status_code == 200:
+            logger.info("✅ Message sent to Telegram")
+            return True
+        else:
+            logger.error(f"Telegram API error: {response.text}")
+            return False
     except Exception as e:
         logger.error(f"Telegram error: {e}")
         return False
 
 def send_telegram_sms(date_str: str, num: str, sms_text: str, otp: str, cli_source: str, is_update: bool = False):
-    """Send SMS notification with instant copy button"""
+    """
+    Send SMS notification with instant copy button using copy_text parameter
+    🔥 এক ক্লিকেই OTP কপি হবে - কোনো লোডিং, কোনো অ্যালার্ট নেই!
+    """
     masked = f"***{num[-4:]}" if len(num) > 4 else num
     header = "🔴 NEW SMS RECEIVED" if not is_update else "🔄 UPDATED SMS"
     
@@ -86,11 +94,15 @@ def send_telegram_sms(date_str: str, num: str, sms_text: str, otp: str, cli_sour
 ✅ <b>Full Message:</b>
 <code>{sms_text[:500]}</code>"""
     
-    # 🔥 আপনার স্ক্রিনশটের মতো - শুধু OTP সংখ্যাটি বাটনে দেখাবে
+    # 🔥 copy_text প্যারামিটার ব্যবহার করে ইনস্ট্যান্ট কপি বাটন
+    # Telegram API version 21.7+ এ এটি সাপোর্ট করে
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": f"{otp}", "callback_data": f"copy_{otp}"}  # শুধু সংখ্যা, কোন টেক্সট নেই
+                {
+                    "text": f"📋 {otp}",
+                    "copy_text": otp  # ← এই লাইনটাই magic! এক ক্লিকেই কপি
+                }
             ],
             [
                 {"text": "🔢 MAIN CHANNEL", "url": BOT_LINK},
@@ -138,56 +150,9 @@ def update_firebase(num: str, msg: str, date_str: str, cli_source: str = "Unknow
             "paid": False
         }
         requests.put(url, json=payload, timeout=5)
+        logger.info(f"📁 Saved to Firebase: {num[-4:]}")
     except Exception as e:
         logger.error(f"Firebase error: {e}")
-
-# 🔥 FAST Callback Handler - লোডিং ছাড়াই কপি হবে
-def run_callback_poller():
-    """Handle callback queries - instant copy without loading"""
-    last_update_id = 0
-    
-    while True:
-        try:
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-            response = requests.get(url, params={
-                "offset": last_update_id + 1,
-                "timeout": 1,
-                "allowed_updates": ["callback_query"]
-            }, timeout=2)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("ok"):
-                    for update in data.get("result", []):
-                        last_update_id = update.get("update_id")
-                        
-                        if "callback_query" in update:
-                            callback = update["callback_query"]
-                            callback_id = callback["id"]
-                            data_cb = callback.get("data", "")
-                            
-                            if data_cb and data_cb.startswith("copy_"):
-                                otp = data_cb.replace("copy_", "")
-                                
-                                # 🔥 কী পয়েন্ট: show_alert ব্যবহার করে instant copy
-                                answer_url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
-                                answer_response = requests.post(answer_url, json={
-                                    "callback_query_id": callback_id,
-                                    "text": otp,  # OTP দেখাবে
-                                    "show_alert": True,  # Alert আসবে এবং কপি হবে
-                                    "cache_time": 0
-                                }, timeout=1)
-                                
-                                if answer_response.status_code == 200:
-                                    logger.info(f"📋 OTP copied instantly: {otp}")
-                                else:
-                                    logger.error(f"Callback failed: {answer_response.text}")
-            
-            time.sleep(0.1)  # ঘন ঘন পোলিং করে
-            
-        except Exception as e:
-            logger.error(f"Poller error: {e}")
-            time.sleep(1)
 
 async def login(page):
     """Login to the panel"""
@@ -196,26 +161,37 @@ async def login(page):
         await page.goto(LOGIN_URL, wait_until="networkidle", timeout=30000)
         await page.wait_for_timeout(3000)
         
+        # Find and solve math captcha
         result = await page.evaluate(f"""
             (function() {{
                 const myUser = "{MY_USER}";
                 const myPass = "{MY_PASS}";
                 
+                // Find math question
                 const match = document.body.innerText.match(/What is\\s+(\\d+)\\s*\\+\\s*(\\d+)/i);
                 if (!match) return false;
                 
                 const sum = parseInt(match[1]) + parseInt(match[2]);
+                console.log("Math:", match[1], "+", match[2], "=", sum);
                 
+                // Find input fields
                 const inputs = document.querySelectorAll('input');
                 let userField = null, passField = null, answerField = null;
                 
                 for(let inp of inputs) {{
                     const placeholder = (inp.placeholder || "").toLowerCase();
                     const type = inp.type || "";
+                    const name = (inp.name || "").toLowerCase();
                     
-                    if (type === 'password') passField = inp;
-                    else if (placeholder.includes('user') || type === 'text') userField = inp;
-                    else if (placeholder.includes('answer')) answerField = inp;
+                    if (type === 'password') {{
+                        passField = inp;
+                    }}
+                    else if (placeholder.includes('user') || type === 'text' || name.includes('user')) {{
+                        userField = inp;
+                    }}
+                    else if (placeholder.includes('answer') || name.includes('ans') || name.includes('captcha')) {{
+                        answerField = inp;
+                    }}
                 }}
                 
                 if (userField && passField && answerField) {{
@@ -223,16 +199,27 @@ async def login(page):
                     passField.value = myPass;
                     answerField.value = sum;
                     
+                    // Trigger events
                     userField.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     passField.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     answerField.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     
+                    // Find and click login button
                     const buttons = document.querySelectorAll('button, input[type="submit"]');
                     for(let btn of buttons) {{
-                        if((btn.innerText || btn.value || "").toLowerCase().includes('login')) {{
+                        const btnText = (btn.innerText || btn.value || "").toLowerCase();
+                        if(btnText.includes('login') || btnText.includes('sign')) {{
                             btn.click();
+                            console.log("Login button clicked");
                             return true;
                         }}
+                    }}
+                    
+                    // Try form submit
+                    const form = document.querySelector('form');
+                    if(form) {{
+                        form.submit();
+                        return true;
                     }}
                 }}
                 return false;
@@ -241,22 +228,37 @@ async def login(page):
         
         if result:
             await page.wait_for_timeout(5000)
-            logger.info("✅ Login successful")
-            return True
+            # Check if login successful
+            current_url = page.url
+            if "login" not in current_url.lower():
+                logger.info("✅ Login successful")
+                return True
+            else:
+                logger.warning("⚠️ Login may have failed")
+                return False
         else:
-            logger.error("❌ Login failed")
+            logger.error("❌ Login script failed")
             return False
             
     except Exception as e:
         logger.error(f"Login error: {e}")
         return False
 
-async def main():
+async def start_bot():
     """Main bot loop"""
     logger.info("🚀 PDX SMS Bot starting...")
+    logger.info("⚡ Using copy_text - Instant OTP copy without loading!")
     
     # Send startup message
-    send_telegram_message("🟢 <b>PDX SMS Bot Started</b>\n\n✅ Monitoring active\n⚡ Instant OTP copy (no loading)", None)
+    startup_text = """<b>🟢 PDX SMS Bot Started</b>
+
+✅ Monitoring active
+⚡ <b>Instant OTP Copy</b> - Just click the button!
+📋 OTP will be copied directly to clipboard
+
+<i>No loading, no alerts, instant copy!</i>"""
+    
+    send_telegram_message(startup_text, None)
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -271,7 +273,7 @@ async def main():
         
         context = await browser.new_context(
             viewport={'width': 1280, 'height': 720},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0'
         )
         
         page = await context.new_page()
@@ -279,67 +281,86 @@ async def main():
         # Login with retry
         login_success = False
         for attempt in range(3):
+            logger.info(f"Login attempt {attempt + 1}/3")
             if await login(page):
                 login_success = True
                 break
-            logger.warning(f"Login attempt {attempt + 1}/3 failed")
             await asyncio.sleep(10)
         
         if not login_success:
-            logger.error("Failed to login after 3 attempts")
+            logger.error("❌ Failed to login after 3 attempts")
             await browser.close()
             return
         
         is_first_scan = True
+        consecutive_errors = 0
         
         while True:
             try:
+                # Navigate to target page
                 await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(2000)
                 
-                if "login" in page.url.lower():
-                    logger.warning("Redirected to login, re-authenticating...")
-                    await login(page)
-                    continue
+                # Check if redirected to login
+                current_url = page.url
+                if "login" in current_url.lower():
+                    logger.warning("🔄 Redirected to login, re-authenticating...")
+                    if await login(page):
+                        consecutive_errors = 0
+                        continue
+                    else:
+                        raise Exception("Re-login failed")
                 
-                rows = await page.query_selector_all("table tbody tr")
+                # Extract SMS data from table
                 valid_rows = []
+                rows = await page.query_selector_all("table tbody tr")
                 
-                for row in rows:
-                    cols = await row.query_selector_all("td")
-                    if len(cols) >= 7:
-                        try:
-                            date = (await cols[0].inner_text()).strip()
-                            number = (await cols[2].inner_text()).strip()
-                            sms = (await cols[4].inner_text()).strip()
-                            cli = (await cols[3].inner_text()).strip()
-                            
-                            if date and len(re.sub(r'\D', '', number)) >= 8:
-                                valid_rows.append({
-                                    "date": date,
-                                    "num": number,
-                                    "sms": sms,
-                                    "cli": cli if cli else "Unknown"
-                                })
-                        except:
-                            continue
+                if rows:
+                    logger.info(f"📊 Found {len(rows)} rows in table")
+                    
+                    for row in rows:
+                        cols = await row.query_selector_all("td")
+                        if len(cols) >= 7:
+                            try:
+                                date = (await cols[0].inner_text()).strip()
+                                number = (await cols[2].inner_text()).strip()
+                                sms = (await cols[4].inner_text()).strip()
+                                cli = (await cols[3].inner_text()).strip()
+                                
+                                # Clean number
+                                digits_only = re.sub(r'\D', '', number)
+                                if date and len(digits_only) >= 8:
+                                    valid_rows.append({
+                                        "date": date,
+                                        "num": number,
+                                        "sms": sms,
+                                        "cli": cli if cli else "Unknown"
+                                    })
+                            except Exception as e:
+                                logger.warning(f"Row parse error: {e}")
+                                continue
                 
                 if valid_rows:
-                    logger.info(f"📊 Found {len(valid_rows)} valid SMS")
+                    logger.info(f"✅ Valid SMS rows: {len(valid_rows)}")
                     
                     if is_first_scan:
+                        # Send the latest SMS on first scan
                         item = valid_rows[0]
                         otp = extract_otp(item['sms'])
+                        
                         if send_telegram_sms(item['date'], item['num'], item['sms'], otp, item['cli']):
                             update_firebase(item['num'], item['sms'], item['date'], item['cli'])
                             logger.info(f"📨 Initial SMS sent - OTP: {otp}")
                         
+                        # Cache all existing messages
                         for item in valid_rows:
                             sent_msgs[f"{item['num']}|{item['sms']}"] = item['date']
                         
                         is_first_scan = False
+                        consecutive_errors = 0
                         
                     else:
+                        # Check for new messages
                         new_count = 0
                         for item in reversed(valid_rows):
                             uid = f"{item['num']}|{item['sms']}"
@@ -352,27 +373,55 @@ async def main():
                                     new_count += 1
                                     logger.info(f"🆕 New SMS #{new_count} - OTP: {otp}")
                                 
+                                # Rate limit to avoid flooding
                                 if new_count >= 5:
                                     await asyncio.sleep(2)
                         
                         if new_count > 0:
-                            logger.info(f"📤 Sent {new_count} new messages")
+                            logger.info(f"📤 Sent {new_count} new SMS messages")
                 
+                # Clean old cache
                 if len(sent_msgs) > 2000:
+                    old_count = len(sent_msgs)
                     sent_msgs.clear()
-                    
+                    logger.info(f"🧹 Cache cleared: {old_count} items removed")
+                
+                consecutive_errors = 0
+                
             except Exception as e:
-                logger.error(f"Loop error: {e}")
+                consecutive_errors += 1
+                logger.error(f"❌ Loop error #{consecutive_errors}: {e}")
+                
+                wait_time = min(60, 5 * consecutive_errors)
+                logger.info(f"⏳ Waiting {wait_time} seconds...")
+                await asyncio.sleep(wait_time)
+                
+                # Recreate page on too many errors
+                if consecutive_errors >= 5:
+                    logger.warning("🔄 Too many errors, recreating page...")
+                    await page.close()
+                    page = await context.new_page()
+                    if await login(page):
+                        consecutive_errors = 0
+                        logger.info("✅ Page recreated and logged in")
+                    else:
+                        logger.error("❌ Failed to re-login")
+                        await asyncio.sleep(30)
             
-            await asyncio.sleep(3)
+            await asyncio.sleep(3)  # Scan interval
+
+async def main():
+    """Main entry point with auto-restart"""
+    while True:
+        try:
+            await start_bot()
+            logger.info("Bot stopped, restarting in 10 seconds...")
+            await asyncio.sleep(10)
+        except Exception as e:
+            logger.error(f"Fatal error: {e}")
+            await asyncio.sleep(30)
 
 if __name__ == "__main__":
-    # Start callback poller in background
-    poller_thread = threading.Thread(target=run_callback_poller, daemon=True)
-    poller_thread.start()
-    logger.info("✅ Instant Copy Callback Poller started")
-    
-    # Run main bot
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
